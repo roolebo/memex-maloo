@@ -141,6 +141,135 @@ test_usage() {
   check requests "$(requests length)" 0
 }
 
+SHA=cdc360986f2590957d6fb1296b7bccfa5fdafa34
+S50=5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f50
+S51=5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f51
+S52=5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f52
+MASTER=77d1e2f3-a4b5-4c6d-8e7f-9a0b1c2d3e4f
+
+# The code reviews of SHA come in pages of 2; the third page is short
+route_runs() {
+  route GET "$API/code_reviews?commit_id=$SHA&offset=0" reviews-0.json
+  route GET "$API/code_reviews?commit_id=$SHA&offset=2" reviews-2.json
+  route GET "$API/code_reviews?commit_id=$SHA&offset=4" reviews-4.json
+  route GET "$API/test_sessions?id=$S50" session-50.json
+  route GET "$API/test_sessions?id=$S51" session-51.json
+  route GET "$API/test_sessions?id=$S52" session-52.json
+}
+
+# Each session appears once; reviews of other commits are dropped
+test_runs() {
+  route_runs
+  call runs "$SHA"
+  check status "$STATUS" 0
+  check runs "$(records '[.[].id] | join(" ")')" "$S50 $S51 $S52"
+  check_json run '.[0]' << EOF
+{"id": "$S50", "source": "$ADDR", "role": "ci", "kind": "run",
+ "basis": "5:3:1:1:3600",
+ "links": [["commit", "$SHA"], ["change", "69978"], ["revision", "2"]],
+ "data": {"commit": "$SHA", "status": "done", "result": "fail",
+          "started": "2026-10-23T14:20:00Z",
+          "finished": "2026-10-23T15:20:00Z",
+          "url": "$ADDR/test_sessions/$S50",
+          "config": {
+            "test_group": "review-ldiskfs",
+            "test_name":
+              "lustre-reviews-el9.7-x86_64--review-ldiskfs--1.134377",
+            "test_host": "onyx-41vm1", "trigger_job": "lustre-reviews"}},
+ "notes": {}}
+EOF
+  check_json others '.[1:] | map([.links, .data.result, .data.config])' \
+    << EOF
+[[[["commit", "$SHA"], ["change", "69978"], ["revision", "2"]], "error",
+  {"test_group": "review-zfs",
+   "test_name": "lustre-reviews-el9.7-x86_64--review-zfs--1.134377",
+   "test_host": "onyx-42vm1", "trigger_job": "lustre-reviews"}],
+ [[["commit", "$SHA"], ["change", "69978"], ["revision", "2"]], "pass",
+  {"test_group": "review-dne-part-1",
+   "test_name": "lustre-reviews-el9.7-x86_64--review-dne-part-1--1.134377",
+   "test_host": "onyx-43vm1"}]]
+EOF
+  check anonymous "$(requests '[.[].auth] | unique | tojson')" '[null]'
+}
+
+test_runs_uppercase() {
+  route_runs
+  call runs CDC360986F2590957D6FB1296B7BCCFA5FDAFA34
+  check status "$STATUS" 0
+  check count "$(records length)" 3
+}
+
+test_runs_none() {
+  route GET "$API/code_reviews?commit_id=0123abc&offset=0" empty.json
+  call runs 0123abc
+  check status "$STATUS" 0
+  check output "$OUT" ''
+}
+
+test_runs_fail() {
+  route GET "$API/code_reviews?commit_id=$SHA&offset=0" reviews-0.json
+  route GET "$API/code_reviews?commit_id=$SHA&offset=2" - 502
+  call runs "$SHA"
+  check status "$STATUS" 1
+  check_has error "$ERR" "Cannot read $API/code_reviews?commit_id=$SHA"
+  check output "$OUT" ''
+}
+
+# The password goes to curl in its config on stdin
+test_runs_logged_in() {
+  login
+  route_runs
+  call runs "$SHA"
+  check status "$STATUS" 0
+  check auth "$(requests '[.[].auth] | unique | .[]')" stdin
+  check user "$(requests '[.[].user] | unique | .[]')" \
+    "jdoe@example.org:$SECRET"
+}
+
+test_runs_netrc() {
+  echo 'machine testing.example.org login jdoe password x' > "$HOME/.netrc"
+  route_runs
+  call runs "$SHA"
+  check status "$STATUS" 0
+  check auth "$(requests '[.[].auth] | unique | .[]')" netrc
+}
+
+test_run() {
+  route GET "$API/code_reviews?test_session_id=$S50" review-session.json
+  route GET "$API/test_sessions?id=$S50" session-50.json
+  call run "$S50"
+  check status "$STATUS" 0
+  check_json run '.[0] | [.id, .links, .data.result]' << EOF
+["$S50", [["commit", "$SHA"], ["change", "69978"], ["revision", "2"]],
+ "fail"]
+EOF
+}
+
+# A branch build tested no review
+test_run_no_review() {
+  route GET "$API/code_reviews?test_session_id=$MASTER" empty.json
+  route GET "$API/test_sessions?id=$MASTER" session-master.json
+  call run "$MASTER"
+  check status "$STATUS" 0
+  check_json run '.[0] | [.basis, .links, .data]' << EOF
+["60:60:0:0:null", [],
+ {"commit": null, "status": "done", "result": "pass",
+  "started": "2026-10-20T03:00:00Z", "finished": "2026-10-20T03:00:00Z",
+  "url": "$ADDR/test_sessions/$MASTER",
+  "config": {"test_group": "full",
+             "test_name": "lustre-master-el9.7-x86_64--full--1.4567",
+             "test_host": "trevis-12vm1", "trigger_job": "lustre-master"}}]
+EOF
+}
+
+test_run_missing() {
+  route GET "$API/code_reviews?test_session_id=$S50" empty.json
+  route GET "$API/test_sessions?id=$S50" empty.json
+  call run "$S50"
+  check status "$STATUS" 1
+  check_has error "$ERR" "No test session $S50"
+}
+
 run() {
   local failed=$FAILED
   TEST=$1
