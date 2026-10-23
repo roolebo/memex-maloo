@@ -143,7 +143,8 @@ session() {
   jq -c --arg addr "$ADDR" --argjson review "$2" "$JQ_DEFS"'
       ($review.data // "{}" | if type == "string" then fromjson? else . end
         // {}) as $cr
-      | ($review.commit_id // null | ascii_downcase?) as $commit
+      | ($review.commit_id // null
+        | if type == "string" then ascii_downcase else null end) as $commit
       | (.test_sets_failed_count // 0) as $failed
       | (.test_sets_aborted_count // 0) as $aborted
       | record("run"; .id;
