@@ -392,6 +392,83 @@ test_tests_fail() {
   check output "$OUT" ''
 }
 
+# Signs in to the web form, then posts the session's retest form with the
+# reason as the issue
+route_retest() {
+  route GET "$ADDR/signin" signin.html
+  route POST "$ADDR/sessions" - 302
+  route GET "$ADDR/test_sessions/$S50" session.html "${1:-200}"
+  route POST "$ADDR/test_sessions/$S50/retest" "${2:-retested.html}"
+}
+
+test_retest() {
+  login
+  echo '{"reason": "LU-930"}' > "$IN"
+  route_retest
+  call retest "$S50"
+  check status "$STATUS" 0
+  check output "$OUT" ''
+  check requests "$(requests '.[] | "\(.method) \(.url)"')" \
+    "GET $ADDR/signin
+POST $ADDR/sessions
+GET $ADDR/test_sessions/$S50
+POST $ADDR/test_sessions/$S50/retest"
+  check signin "$(requests '.[1].body | split("&") | .[]')" \
+    'authenticity_token=sign%2Bin%2Ftoken%3D%3D
+email=jdoe%40example.org
+password=pa%22ss%5Cword
+commit=Sign%20in'
+  check retest "$(requests '.[3].body | split("&") | .[]')" \
+    'authenticity_token=retest%2Bform%2Ftoken%3D%3D
+retest_option=single
+bug_id=LU-930
+commit=Retest'
+  check cookies "$(requests '[.[1:][].cookies] | unique | tojson')" \
+    '["session=fake"]'
+  check "no API credentials" "$(requests '[.[].auth] | unique | tojson')" \
+    '[null]'
+}
+
+test_retest_refused() {
+  login
+  echo '{"reason": "LU-0"}' > "$IN"
+  route_retest 200 refused.html
+  call retest "$S50"
+  check status "$STATUS" 1
+  check_has error "$ERR" 'Retest refused: Bug LU-0 does not exist'
+}
+
+# Without a session, Maloo redirects the session page to the sign-in
+test_retest_signin_fails() {
+  login
+  echo '{"reason": "LU-930"}' > "$IN"
+  route_retest 302
+  call retest "$S50"
+  check status "$STATUS" 1
+  check_has error "$ERR" "Cannot sign in to $ADDR: HTTP 302"
+  check posts "$(requests 'map(select(.method == "POST")) | length')" 1
+}
+
+test_retest_netrc() {
+  echo 'machine testing.example.org login jdoe password x' > "$HOME/.netrc"
+  echo '{"reason": "LU-930"}' > "$IN"
+  call retest "$S50"
+  check status "$STATUS" 1
+  check_has error "$ERR" 'retest needs MALOO_USER and MALOO_PASSWORD'
+  check requests "$(requests length)" 0
+}
+
+test_retest_no_reason() {
+  login
+  echo '{}' > "$IN"
+  call retest "$S50"
+  check empty "$STATUS" 1
+  echo 'LU-930' > "$IN"
+  call retest "$S50"
+  check "not JSON" "$STATUS" 1
+  check requests "$(requests length)" 0
+}
+
 run() {
   local failed=$FAILED
   TEST=$1
