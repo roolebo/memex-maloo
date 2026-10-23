@@ -270,6 +270,128 @@ test_run_missing() {
   check_has error "$ERR" "No test session $S50"
 }
 
+SET0=3b4c5d6e-7f80-4912-a3b4-c5d6e7f80910
+SET1=3b4c5d6e-7f80-4912-a3b4-c5d6e7f80911
+SET2=3b4c5d6e-7f80-4912-a3b4-c5d6e7f80912
+SCRIPT=c1a2b3c4-0000-4000-8000-000000000
+SUB=9c8d7e6f-5a4b-4c3d-8e2f-1a0b9c8d7e6
+SUB_SCRIPT=d1e2f3a4-0000-4000-8000-000000000
+
+# The test sets of S50 come in pages of 2; the API answers with a set of
+# another session too
+route_sets() {
+  route GET "$API/test_sets?test_session_id=$S50&offset=0" sets-0.json
+  route GET "$API/test_sets?test_session_id=$S50&offset=2" sets-2.json
+  route GET "$API/test_sets?test_session_id=$S50&offset=4" empty.json
+  route GET "$API/bug_links?buggable_id=$SET0&offset=0" links-set-0.json
+  route GET "$API/bug_links?buggable_id=$SET0&offset=4" empty.json
+  route GET "$API/bug_links?buggable_id=$SET1&offset=0" empty.json
+  route GET "$API/bug_links?buggable_id=$SET2&offset=0" empty.json
+}
+
+route_set_scripts() {
+  local i
+  for i in 1 2 3; do
+    route GET "$API/test_set_scripts?id=${SCRIPT}00$i" script-set-$i.json
+  done
+}
+
+# Only accepted bug links are issues
+test_suites() {
+  route_sets
+  route_set_scripts
+  call suites "$S50"
+  check status "$STATUS" 0
+  check_json sanity '.[0]' << EOF
+{"id": "$SET0", "source": "$ADDR", "role": "ci", "kind": "suite",
+ "basis": "FAIL:410:2:9:DCO-11631,LU-19273",
+ "links": [["issue", "DCO-11631"], ["issue", "LU-19273"]],
+ "data": {"run": "$S50", "name": "sanity", "result": "fail",
+          "counts": {"pass": 410, "fail": 2, "skip": 9}, "duration": 2410,
+          "url": "$ADDR/test_sets/$SET0"},
+ "notes": {}}
+EOF
+  check_json others '.[1:] | map([.id, .links, .data.name, .data.result,
+      .data.duration])' << EOF
+[["$SET1", [], "conf-sanity", "pass", 600],
+ ["$SET2", [], "sanity-hsm", "timeout", null]]
+EOF
+}
+
+# Script names are looked up once, then kept in the cache
+test_suites_cache() {
+  export XDG_CACHE_HOME=$TEST_DIR/cache
+  route_sets
+  route_set_scripts
+  call suites "$S50"
+  call suites "$S50"
+  check status "$STATUS" 0
+  check names "$(records '[.[].data.name] | join(" ")')" \
+    'sanity conf-sanity sanity-hsm'
+  check lookups \
+    "$(requests 'map(select(.url | contains("scripts"))) | length')" 3
+  check cache "$(jq -c 'to_entries | map(.value)' \
+    "$XDG_CACHE_HOME/memex-maloo/testing.example.org/test_set_scripts.json")" \
+    '["sanity","conf-sanity","sanity-hsm"]'
+}
+
+# The first route for a request wins
+test_suites_fail() {
+  route GET "$API/bug_links?buggable_id=$SET1&offset=0" - 500
+  route_sets
+  route_set_scripts
+  call suites "$S50"
+  check status "$STATUS" 1
+  check output "$OUT" ''
+}
+
+# The sub tests of SET0 come in pages of 2. Maloo answers every offset
+# of their related bug links with the same page
+route_subs() {
+  local i
+  route GET "$API/sub_tests?test_set_id=$SET0&offset=0" subs-0.json
+  route GET "$API/sub_tests?test_set_id=$SET0&offset=2" subs-2.json
+  route GET "$API/sub_tests?test_set_id=$SET0&offset=4" subs-4.json
+  for i in 001 051 060 101; do
+    route GET "$API/sub_test_scripts?id=$SUB_SCRIPT$i" script-sub-$i.json
+  done
+  route GET "$API/bug_links?buggable_id=$SET0&related=true&offset=0" \
+    links-subs.json
+  route GET "$API/bug_links?buggable_id=$SET0&related=true&offset=5" \
+    links-subs.json
+}
+
+test_tests() {
+  route_subs
+  call tests "$SET0"
+  check status "$STATUS" 0
+  check_json failed '.[1]' << EOF
+{"id": "${SUB}0", "source": "$ADDR", "role": "ci", "kind": "test",
+ "basis": "FAIL:LU-19273", "links": [["issue", "LU-19273"]],
+ "data": {"suite": "$SET0", "name": "test_51b", "result": "fail",
+          "error": "dd failed: No space left on device", "duration": 41,
+          "url": "$ADDR/sub_tests/${SUB}0"},
+ "notes": {}}
+EOF
+  check_json order 'map([.id, .data.name, .data.result, .data.error,
+      .links])' << EOF
+[["${SUB}1", "test_0a", "pass", null, []],
+ ["${SUB}0", "test_51b", "fail", "dd failed: No space left on device",
+  [["issue", "LU-19273"]]],
+ ["${SUB}2", "test_60a", "skip", "skipped: ZFS only", []],
+ ["${SUB}3", "test_101", "timeout", "Autotest time out",
+  [["issue", "DCO-11677"]]],
+ ["${SUB}4", "order_6", "fail", null, []]]
+EOF
+}
+
+test_tests_fail() {
+  route GET "$API/sub_tests?test_set_id=$SET0&offset=0" - 404
+  call tests "$SET0"
+  check status "$STATUS" 1
+  check output "$OUT" ''
+}
+
 run() {
   local failed=$FAILED
   TEST=$1

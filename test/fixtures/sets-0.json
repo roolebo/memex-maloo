@@ -1,0 +1,4 @@
+{"data": [
+  {"id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80910", "test_session_id": "5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f50", "test_set_script_id": "c1a2b3c4-0000-4000-8000-000000000001", "status": "FAIL", "duration": 2410, "sub_tests_passed_count": 410, "sub_tests_failed_count": 2, "sub_tests_skipped_count": 9, "sub_tests_count": 421},
+  {"id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80911", "test_session_id": "5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f50", "test_set_script_id": "c1a2b3c4-0000-4000-8000-000000000002", "status": "PASS", "duration": 600, "sub_tests_passed_count": 120, "sub_tests_failed_count": 0, "sub_tests_skipped_count": 0, "sub_tests_count": 120}
+], "total": 3}

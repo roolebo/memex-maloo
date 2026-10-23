@@ -1,0 +1,4 @@
+{"data": [
+  {"id": "9c8d7e6f-5a4b-4c3d-8e2f-1a0b9c8d7e62", "test_set_id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80910", "sub_test_script_id": "d1e2f3a4-0000-4000-8000-000000000060", "status": "SKIP", "error": "skipped: ZFS only", "duration": 0, "order": 4, "return_code": 0},
+  {"id": "9c8d7e6f-5a4b-4c3d-8e2f-1a0b9c8d7e63", "test_set_id": "3b4c5d6e-7f80-4912-a3b4-c5d6e7f80910", "sub_test_script_id": "d1e2f3a4-0000-4000-8000-000000000101", "status": "TIMEOUT", "error": "Autotest time out", "duration": 5400, "order": 5, "return_code": -1}
+], "total": 5}
