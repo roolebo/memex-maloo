@@ -38,12 +38,17 @@ EOF
 HOST_RE='^https?://([^/:]+)'
 ID_RE='^[0-9A-Za-z-]+$'
 
+# Escapes a string for a double-quoted value in a curl config
+quote() {
+  sed 's/[\\"]/\\&/g' <<< "$1"
+}
+
 # curl with the credentials, retried: Maloo drops a few connections
 fetch() {
   # The password goes to curl on stdin, not on its command line
   if [ "$AUTH" == env ]; then
-    printf 'user = "%s:%s"\n' "$MALOO_USER" "$MALOO_PASSWORD" |
-      curl -fsS --retry 3 -K - "$@"
+    printf 'user = "%s:%s"\n' "$(quote "$MALOO_USER")" \
+      "$(quote "$MALOO_PASSWORD")" | curl -fsS --retry 3 -K - "$@"
   elif [ "$AUTH" == netrc ]; then
     curl -fsS --retry 3 --netrc "$@"
   else
