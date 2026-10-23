@@ -56,4 +56,4 @@ Capabilities: `tests`, `retest` and `bugs` are true, `logs` false.
   the session by this one?
 
 [memex]: https://github.com/roolebo/memex
-[ci.md]: https://github.com/roolebo/memex/blob/main/ci.md
+[ci.md]: https://github.com/roolebo/memex/blob/main/skills/memex/ci.md
