@@ -2,8 +2,7 @@
 #
 # memex-maloo: memex adapter for the ci role in Maloo.
 #
-#   memex-maloo detect REPO
-#   memex-maloo ADDR COMMAND [ARGUMENTS]
+#   memex-maloo ADDR ROLE COMMAND [ARGUMENTS]
 #
 # README.md specifies the mapping. Credentials come from MALOO_USER and
 # MALOO_PASSWORD, e.g. set by withkeys, or else from ~/.netrc for ADDR's
@@ -27,19 +26,13 @@ unsupported() {
 
 usage() {
   cat << EOF
-Usage: $0 detect REPO
-       $0 ADDR capabilities
-       $0 ADDR runs COMMIT
-       $0 ADDR run RUN
-       $0 ADDR suites RUN
-       $0 ADDR tests SUITE
-       $0 ADDR retest RUN < REASON
+Usage: $0 ADDR ci capabilities
+       $0 ADDR ci runs COMMIT
+       $0 ADDR ci run RUN
+       $0 ADDR ci suites RUN
+       $0 ADDR ci tests SUITE
+       $0 ADDR ci retest RUN < REASON
 EOF
-}
-
-# Maloo is named nowhere in a working copy, so this recognizes nothing
-detect() {
-  [ -d "$1" ] || die "No such directory: $1"
 }
 
 HOST_RE='^https?://([^/:]+)'
@@ -321,12 +314,13 @@ if [ "$1" == "-h" -o "$1" == "--help" ]; then
   usage
   exit 0
 fi
-if [ "$1" == detect ]; then
-  [ $# -eq 2 ] || die "$(usage)"
-  detect "$2"
-  exit 0
+[ $# -ge 3 ] || die "$(usage)"
+if [ "$2" != ci ]; then
+  echo "Not a $2 adapter" >&2
+  exit 2
 fi
-[ $# -ge 2 ] || die "$(usage)"
+# Drop ROLE: the commands below take ADDR COMMAND [ARGUMENTS]
+set -- "$1" "${@:3}"
 
 ADDR=${1%/}
 [[ "$ADDR" =~ $HOST_RE ]] || die "Not an http(s) URL: $1"

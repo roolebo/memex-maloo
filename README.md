@@ -11,7 +11,6 @@ ADDR is the base URL of the server. The adapter uses the JSON API under
 page of a list by `offset`. `retest` signs in to the web form, which
 needs the password from the environment.
 
-`detect` prints nothing.
 
 ## Commands
 
