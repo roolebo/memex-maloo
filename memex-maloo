@@ -161,7 +161,8 @@ session() {
                      elif $aborted > 0 then "error" else "pass" end),
             started: (try ((.submission | sub("\\.[0-9]+"; "")
               | fromdateiso8601) - (.duration // 0) | todate) catch null),
-            finished: (.submission // null),
+            finished: (try (.submission | sub("\\.[0-9]+"; "")
+              | fromdateiso8601 | todate) catch null),
             url: "\($addr)/test_sessions/\(.id)",
             config: ({test_group, test_name, test_host, trigger_job}
               | with_entries(select(.value != null)))
