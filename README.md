@@ -3,6 +3,8 @@
 A [memex] adapter for the `ci` role in Maloo. The role is specified in
 memex's [ci.md].
 
+Tests run offline, with a fake curl: `test/run [TEST...]`.
+
 ## Reaching Maloo
 
 ADDR is the base URL of the server. The adapter uses the JSON API under

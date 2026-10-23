@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+#
+# test/run: tests of memex-maloo, offline.
+#
+# curl is test/bin/curl, a fake that answers from fixtures in
+# test/fixtures and logs what the adapter asked. Each test gets its own
+# routes, log and HOME, so its own script name cache, under a temporary
+# directory; MALOO_USER and MALOO_PASSWORD are unset unless the test sets
+# them.
+#
+
+set -e
+
+CURDIR=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+ADAPTER=$(dirname "$CURDIR")/memex-maloo
+ADDR=https://testing.example.org
+API=$ADDR/api
+# A password curl's config must quote
+SECRET='pa"ss\word'
+DIR=$(mktemp -d)
+FAILED=0
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat << EOF
+Usage: $0 [TEST...]
+
+Runs the given tests, or all of them:
+$(declare -F | cut -d' ' -f3 | grep '^test_' | sed 's/^/  /')
+EOF
+}
+
+cleanup() {
+  rm -rf "$DIR"
+}
+
+# Answer METHOD URL with test/fixtures/FIXTURE, or nothing for -, and
+# HTTP status CODE, 200 by default
+route() {
+  echo "$1 $2 $3 ${4:-200}" >> "$FAKE/routes"
+}
+
+# Run the adapter's ci role: ARGS, stdin from IN; sets OUT, ERR and
+# STATUS
+call() {
+  STATUS=0
+  "$ADAPTER" "$ADDR" ci "$@" < "$IN" > "$TEST_DIR/out" \
+    2> "$TEST_DIR/err" || STATUS=$?
+  OUT=$(< "$TEST_DIR/out")
+  ERR=$(< "$TEST_DIR/err")
+}
+
+# jq FILTER on the records printed, as one array
+records() {
+  jq -scr "$1" <<< "$OUT"
+}
+
+# jq FILTER on the requests curl got, as one array
+requests() {
+  touch "$FAKE/log"
+  jq -scr "$1" "$FAKE/log"
+}
+
+login() {
+  export MALOO_USER=jdoe@example.org MALOO_PASSWORD=$SECRET
+}
+
+check() {
+  [ "$2" == "$3" ] && return
+  echo "# $1: expected '$3', got '$2'"
+  FAILED=$((FAILED + 1))
+}
+
+check_has() {
+  [[ $2 == *"$3"* ]] && return
+  echo "# $1: '$2' lacks '$3'"
+  FAILED=$((FAILED + 1))
+}
+
+# Compare jq FILTER on the records with the JSON on stdin
+check_json() {
+  check "$1" "$(jq -sc "$2" <<< "$OUT" | jq -cS .)" "$(jq -cS .)"
+}
+
+# Fails a test that asked for something without a route or put the
+# password on curl's command line
+audit() {
+  local bad
+  [ -f "$FAKE/log" ] || return 0
+  bad=$(jq -r --arg secret "$SECRET" '
+      if .unexpected then "unexpected request: \(.method) \(.url)"
+      elif (.args + [.url] | any(contains($secret)))
+      then "password on the command line: \(.url)"
+      else empty end' "$FAKE/log")
+  [ -n "$bad" ] || return 0
+  sed 's/^/# /' <<< "$bad"
+  FAILED=$((FAILED + 1))
+}
+
+test_capabilities() {
+  call capabilities
+  check status "$STATUS" 0
+  check_json capabilities '.[0]' << 'EOF'
+{"tests": true, "logs": false, "retest": true, "bugs": true}
+EOF
+  check requests "$(requests length)" 0
+}
+
+test_other_role() {
+  STATUS=0
+  "$ADAPTER" "$ADDR" tracker capabilities < "$IN" 2> /dev/null || STATUS=$?
+  check status "$STATUS" 2
+}
+
+test_unknown_command() {
+  call locate cdc3609
+  check status "$STATUS" 2
+}
+
+test_logs() {
+  call logs 3b4c5d6e-7f80-4912-a3b4-c5d6e7f80910
+  check status "$STATUS" 2
+  check requests "$(requests length)" 0
+}
+
+test_usage() {
+  call run
+  check "no run" "$STATUS" 1
+  call run '5e2c0d6a&id=x'
+  check "not an id" "$STATUS" 1
+  call runs cdc360g
+  check "not a commit" "$STATUS" 1
+  STATUS=0
+  "$ADAPTER" testing.example.org ci run 1 < "$IN" 2> /dev/null ||
+    STATUS=$?
+  check "not a URL" "$STATUS" 1
+  check requests "$(requests length)" 0
+}
+
+run() {
+  local failed=$FAILED
+  TEST=$1
+  TEST_DIR=$DIR/$1
+  IN=$TEST_DIR/in
+  mkdir -p "$TEST_DIR/home"
+  : > "$IN"
+  (
+    export HOME=$TEST_DIR/home
+    export FAKE=$TEST_DIR
+    "$1"
+    audit
+    exit $((FAILED - failed))
+  ) || FAILED=$((FAILED + $?))
+  if [ $FAILED -eq $failed ]; then
+    echo "ok $1"
+  else
+    echo "not ok $1"
+  fi
+}
+
+if [ "$1" == "-h" -o "$1" == "--help" ]; then
+  usage
+  exit 0
+fi
+command -v jq > /dev/null || die "jq is not installed"
+trap cleanup EXIT
+export PATH=$CURDIR/bin:$PATH
+[ "$(command -v curl)" == "$CURDIR/bin/curl" ] || die "curl is not the fake"
+export FIXTURES=$CURDIR/fixtures
+unset MALOO_USER MALOO_PASSWORD XDG_CACHE_HOME
+
+TESTS=("$@")
+[ $# -gt 0 ] || TESTS=($(declare -F | cut -d' ' -f3 | grep '^test_'))
+for test in "${TESTS[@]}"; do
+  declare -F "$test" > /dev/null || die "No such test: $test"
+  run "$test"
+done
+[ $FAILED -eq 0 ] || die "$FAILED failed"

@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+#
+# test/bin/curl: a fake curl for test/run, never on the network.
+#
+# Answers a request from FAKE/routes, lines of METHOD URL FIXTURE [CODE]:
+# the reply is FIXTURES/FIXTURE, or nothing for -, with HTTP status CODE,
+# 200 by default. A request without a route fails.
+#
+# Logs every call it parses to FAKE/log, one JSON object each:
+#
+#   method, url, body
+#   auth        stdin for a user in a -K - config, netrc or netrc-optional
+#   user        the user in that config
+#   cookies     what the -b jar holds
+#   args        the command line
+#   unexpected  true for a request without a route
+#
+# Knows only the options the adapters use.
+#
+
+set -e
+
+die() {
+  echo "fake curl: $*" >&2
+  exit 2
+}
+
+# Undoes the quoting of a value in a curl config
+unquote() {
+  sed -e 's/^"//' -e 's/"$//' -e 's/\\\(.\)/\1/g' <<< "$1"
+}
+
+# Reads a curl config: user, netrc-optional and data
+config() {
+  local line
+  local key
+  local value
+  while IFS= read -r line; do
+    key=$(sed 's/[ =].*//' <<< "$line")
+    value=$(unquote "$(sed 's/^[^ =]*[ =]*//' <<< "$line")")
+    case "$key" in
+      user)
+        AUTH=stdin
+        USER_=$value
+        ;;
+      netrc-optional) AUTH=netrc-optional ;;
+      data) DATA+=("$value") ;;
+      *) die "unknown config: $key" ;;
+    esac
+  done
+}
+
+# Prints a --data-urlencode argument encoded: NAME=TEXT or NAME@FILE
+urlencode() {
+  local name
+  local text
+  if [[ $1 == *=* ]]; then
+    name=${1%%=*}
+    text=${1#*=}
+  elif [[ $1 == *@* ]]; then
+    name=${1%%@*}
+    if [ "${1#*@}" == - ]; then
+      IFS= read -rd '' text || true
+    else
+      text=$(< "${1#*@}")
+    fi
+  else
+    text=$1
+  fi
+  [ -n "$name" ] && printf '%s=' "$name"
+  jq -rn --arg t "$text" '$t | @uri'
+}
+
+[ -d "$FAKE" ] || die "FAKE is not a directory: $FAKE"
+ARGS=("$@")
+DATA=()
+FAIL=
+OUT=
+WRITE=
+JAR=
+COOKIES=
+METHOD=
+URL=
+AUTH=
+USER_=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -K)
+      [ "$2" == - ] || die "config only from stdin"
+      config
+      shift
+      ;;
+    --netrc | --netrc-optional) AUTH=${1#--} ;;
+    -o)
+      OUT=$2
+      shift
+      ;;
+    -w)
+      WRITE=$2
+      shift
+      ;;
+    -c)
+      JAR=$2
+      shift
+      ;;
+    -b)
+      COOKIES=$2
+      shift
+      ;;
+    -X)
+      METHOD=$2
+      shift
+      ;;
+    -H | --retry) shift ;;
+    -d | --data | --data-binary)
+      DATA+=("$2")
+      shift
+      ;;
+    --data-urlencode)
+      DATA+=("$(urlencode "$2")")
+      shift
+      ;;
+    -[fsSgL]*)
+      [[ $1 =~ ^-[fsSgL]+$ ]] || die "unknown option: $1"
+      [[ $1 == *f* ]] && FAIL=1
+      ;;
+    -*) die "unknown option: $1" ;;
+    *)
+      [ -z "$URL" ] || die "two URLs: $URL $1"
+      URL=$1
+      ;;
+  esac
+  shift
+done
+[ -n "$URL" ] || die "no URL"
+
+BODY=
+if [ ${#DATA[@]} -gt 0 ]; then
+  BODY=$(IFS='&' && echo "${DATA[*]}")
+  : ${METHOD:=POST}
+fi
+: ${METHOD:=GET}
+[ -n "$COOKIES" ] && COOKIES=$(cat "$COOKIES" 2> /dev/null || echo none)
+
+touch "$FAKE/routes"
+ROUTE=$(awk -v m="$METHOD" -v u="$URL" \
+  '$1 == m && $2 == u { print $3, ($4 ? $4 : 200); exit }' "$FAKE/routes")
+jq -nc --arg method "$METHOD" --arg url "$URL" --arg body "$BODY" \
+  --arg auth "$AUTH" --arg user "$USER_" --arg cookies "$COOKIES" \
+  --arg route "$ROUTE" '{
+    method: $method, url: $url,
+    body: (if $body == "" then null else $body end),
+    auth: (if $auth == "" then null else $auth end),
+    user: (if $user == "" then null else $user end),
+    cookies: (if $cookies == "" then null else $cookies end),
+    args: $ARGS.positional,
+    unexpected: ($route == "")
+  }' --args -- "${ARGS[@]}" >> "$FAKE/log"
+if [ -z "$ROUTE" ]; then
+  echo "fake curl: no route for $METHOD $URL" >&2
+  exit 7
+fi
+read -r FIXTURE CODE <<< "$ROUTE"
+
+[ -n "$JAR" ] && echo "session=fake" > "$JAR"
+if [ -n "$FAIL" -a "$CODE" -ge 400 ]; then
+  echo "curl: (22) The requested URL returned error: $CODE" >&2
+  exit 22
+fi
+if [ "$FIXTURE" != - ]; then
+  if [ -n "$OUT" ]; then
+    cat "$FIXTURES/$FIXTURE" > "$OUT"
+  else
+    cat "$FIXTURES/$FIXTURE"
+  fi
+fi
+if [ -n "$WRITE" ]; then
+  printf '%b' "${WRITE//%\{http_code\}/$CODE}"
+fi
