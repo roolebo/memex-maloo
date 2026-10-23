@@ -20,7 +20,7 @@ die() {
 }
 
 unsupported() {
-  echo "Not supported yet: $1" >&2
+  echo "Not supported: $1" >&2
   exit 2
 }
 
@@ -351,6 +351,6 @@ case "$2" in
     unsupported "$2"
     ;;
   *)
-    die "$(usage)"
+    unsupported "$2"
     ;;
 esac
