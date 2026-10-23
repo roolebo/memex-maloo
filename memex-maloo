@@ -1,0 +1,361 @@
+#!/usr/bin/env bash
+#
+# memex-maloo: memex adapter for the ci role in Maloo.
+#
+#   memex-maloo detect REPO
+#   memex-maloo ADDR COMMAND [ARGUMENTS]
+#
+# README.md specifies the mapping. Credentials come from MALOO_USER and
+# MALOO_PASSWORD, e.g. set by withkeys, or else from ~/.netrc for ADDR's
+# host; retest signs in with a form and needs them from the environment.
+# Script names never change and are cached in
+# ${XDG_CACHE_HOME:-~/.cache}/memex-maloo/HOST. Never prompts. Logs are
+# not implemented yet and exit 2.
+#
+
+set -e
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+unsupported() {
+  echo "Not supported yet: $1" >&2
+  exit 2
+}
+
+usage() {
+  cat << EOF
+Usage: $0 detect REPO
+       $0 ADDR capabilities
+       $0 ADDR runs COMMIT
+       $0 ADDR run RUN
+       $0 ADDR suites RUN
+       $0 ADDR tests SUITE
+       $0 ADDR retest RUN < REASON
+EOF
+}
+
+# Maloo is named nowhere in a working copy, so this recognizes nothing
+detect() {
+  [ -d "$1" ] || die "No such directory: $1"
+}
+
+HOST_RE='^https?://([^/:]+)'
+ID_RE='^[0-9A-Za-z-]+$'
+
+# curl with the credentials, retried: Maloo drops a few connections
+fetch() {
+  # The password goes to curl on stdin, not on its command line
+  if [ "$AUTH" == env ]; then
+    printf 'user = "%s:%s"\n' "$MALOO_USER" "$MALOO_PASSWORD" |
+      curl -fsS --retry 3 -K - "$@"
+  elif [ "$AUTH" == netrc ]; then
+    curl -fsS --retry 3 --netrc "$@"
+  else
+    curl -fsS --retry 3 "$@"
+  fi
+}
+
+# GET an API path; prints its rows as one JSON array
+get() {
+  local url=$ADDR/api/$1
+  local reply
+  reply=$(fetch "$url") || die "Cannot read $url"
+  jq -c 'if type == "array" then . else .data // [] end' <<< "$reply" ||
+    die "Not JSON: $url"
+}
+
+# GET every page of an API list; prints its rows as one JSON array. The
+# server picks the page size, so a short, empty or repeated page ends it.
+list() {
+  local offset=0
+  local size
+  local page
+  local previous
+  local count
+  local pages
+  while true; do
+    page=$(get "$1&offset=$offset") || exit 1
+    count=$(jq length <<< "$page")
+    [ "$count" -gt 0 -a "$page" != "$previous" ] || break
+    pages+=$page$'\n'
+    previous=$page
+    offset=$((offset + count))
+    : ${size:=$count}
+    [ "$count" -ge "$size" ] || break
+  done
+  jq -cs 'add // []' <<< "$pages"
+}
+
+# Looks up the names of script endpoint $1 that field $2 of the rows in
+# $3 refers to and the cache lacks; prints the cache file, an id -> name
+# map
+names() {
+  local file=$CACHE/$1.json
+  local ids
+  local id
+  local script
+  local found
+  mkdir -p "$CACHE"
+  [ -f "$file" ] || echo '{}' > "$file"
+  ids=$(jq -r --slurpfile names "$file" --arg key "$2" '
+      [.[] | .[$key] // empty | tostring] | unique - ($names[0] | keys)
+      | .[]' <<< "$3")
+  for id in $ids; do
+    script=$(get "$1?id=$id") || exit 1
+    found+=$(jq -c --arg id "$id" '.[]
+        | select((.id | tostring) == $id and .name) | {($id): .name}' \
+      <<< "$script")$'\n'
+  done
+  if [ -n "$found" ]; then
+    jq -cs --slurpfile names "$file" '$names[0] + add' <<< "$found" \
+      > "$file.$$"
+    mv "$file.$$" "$file"
+  fi
+  echo "$file"
+}
+
+# Prints a map from buggable id to the issues of the accepted bug links
+# in the rows on stdin; a link's id is the buggable it is on
+bugs() {
+  jq -c '[.[] | select(.valid == true)
+      | {id: (.id | tostring), issue: (.jira // .bug_upstream_id)}
+      | select(.issue)]
+    | group_by(.id)
+    | map({key: .[0].id, value: (map(.issue) | unique)})
+    | from_entries'
+}
+
+# jq definitions shared by the commands
+JQ_DEFS='
+def record($kind; $id; $basis; $links; $data): {
+  id: $id, source: $addr, role: "ci", kind: $kind,
+  basis: $basis, links: $links, data: $data, notes: {}
+};
+def result: {PASS: "pass", FAIL: "fail", CRASH: "fail", SKIP: "skip",
+  TIMEOUT: "timeout"}[. // ""] // "error";
+def issues: map(["issue", .]);
+'
+
+# Prints the run record of test session $1, which code review row $2
+# (or null) says what it tested
+session() {
+  local rows
+  local session
+  rows=$(get "test_sessions?id=$1") || exit 1
+  session=$(jq -c --arg id "$1" '.[] | select(.id == $id)' <<< "$rows")
+  [ -n "$session" ] || die "No test session $1"
+  jq -c --arg addr "$ADDR" --argjson review "$2" "$JQ_DEFS"'
+      ($review.data // "{}" | if type == "string" then fromjson? else . end
+        // {}) as $cr
+      | ($review.commit_id // null | ascii_downcase?) as $commit
+      | (.test_sets_failed_count // 0) as $failed
+      | (.test_sets_aborted_count // 0) as $aborted
+      | record("run"; .id;
+          "\(.test_sets_count):\(.test_sets_passed_count):\($failed)"
+            + ":\($aborted):\(.duration)";
+          (if $commit then [["commit", $commit]] else [] end)
+            + (if $cr.review_no then [["change", ($cr.review_no | tostring)]]
+               else [] end)
+            + (if $cr.patch_no then [["revision", ($cr.patch_no | tostring)]]
+               else [] end);
+          {
+            commit: $commit,
+            status: "done",
+            result: (if $failed > 0 then "fail"
+                     elif $aborted > 0 then "error" else "pass" end),
+            started: (try ((.submission | sub("\\.[0-9]+"; "")
+              | fromdateiso8601) - (.duration // 0) | todate) catch null),
+            finished: (.submission // null),
+            url: "\($addr)/test_sessions/\(.id)",
+            config: ({test_group, test_name, test_host, trigger_job}
+              | with_entries(select(.value != null)))
+          })' <<< "$session"
+}
+
+runs() {
+  local commit
+  local reviews
+  local id
+  commit=$(tr A-F a-f <<< "$1")
+  reviews=$(list "code_reviews?commit_id=$commit") || exit 1
+  # The API ignores a filter it does not know and answers with everything
+  reviews=$(jq -c --arg commit "$commit" '
+      map(select((.commit_id // "" | ascii_downcase) == $commit))' \
+    <<< "$reviews")
+  for id in $(jq -r '[.[].test_session_id // empty] | unique | .[]' \
+    <<< "$reviews"); do
+    session "$id" "$(jq -c --arg id "$id" '
+        first(.[] | select(.test_session_id == $id))' <<< "$reviews")"
+  done
+}
+
+run() {
+  local reviews
+  reviews=$(get "code_reviews?test_session_id=$1") || exit 1
+  session "$1" "$(jq -c --arg id "$1" '
+      first(.[] | select(.test_session_id == $id)) // null' <<< "$reviews")"
+}
+
+suites() {
+  local sets
+  local file
+  local id
+  local links
+  local found
+  local map
+  sets=$(list "test_sets?test_session_id=$1") || exit 1
+  sets=$(jq -c --arg run "$1" '
+      map(select((.test_session_id // $run) == $run))' <<< "$sets")
+  file=$(names test_set_scripts test_set_script_id "$sets") || exit 1
+  for id in $(jq -r '.[].id' <<< "$sets"); do
+    links=$(list "bug_links?buggable_id=$id") || exit 1
+    found+=$(jq -c --arg id "$id" 'map(select((.id // $id) == $id))' \
+      <<< "$links" | bugs)$'\n'
+  done
+  map=$(jq -cs 'add // {}' <<< "$found")
+  jq -c --arg addr "$ADDR" --arg run "$1" --slurpfile names "$file" \
+    --argjson bugs "$map" "$JQ_DEFS"'
+      .[]
+      | ($bugs[.id] // []) as $issues
+      | {
+          pass: (.sub_tests_passed_count // 0),
+          fail: (.sub_tests_failed_count // 0),
+          skip: (.sub_tests_skipped_count // 0)
+        } as $counts
+      | record("suite"; .id;
+          "\(.status):\($counts | map(tostring) | join(":"))"
+            + ":\($issues | join(","))";
+          ($issues | issues);
+          {
+            run: $run,
+            name: $names[0][.test_set_script_id | tostring],
+            result: (.status | result),
+            counts: $counts,
+            duration: (.duration // null),
+            url: "\($addr)/test_sets/\(.id)"
+          })' <<< "$sets"
+}
+
+tests() {
+  local subs
+  local file
+  local links
+  local map
+  subs=$(list "sub_tests?test_set_id=$1") || exit 1
+  subs=$(jq -c --arg suite "$1" '
+      map(select((.test_set_id // $suite) == $suite)) | sort_by(.order)' \
+    <<< "$subs")
+  file=$(names sub_test_scripts sub_test_script_id "$subs") || exit 1
+  # One request for the links of all the suite's sub tests
+  links=$(list "bug_links?buggable_id=$1&related=true") || exit 1
+  map=$(bugs <<< "$links")
+  jq -c --arg addr "$ADDR" --arg suite "$1" --slurpfile names "$file" \
+    --argjson bugs "$map" "$JQ_DEFS"'
+      .[]
+      | ($bugs[.id] // []) as $issues
+      | record("test"; .id; "\(.status):\($issues | join(","))";
+          ($issues | issues);
+          {
+            suite: $suite,
+            name: ($names[0][.sub_test_script_id | tostring]
+              // "order_\(.order)"),
+            result: (.status | result),
+            error: ((.error // "") | split("\n")[0]
+              | if . == "" then null else . end),
+            duration: (.duration // null),
+            url: "\($addr)/sub_tests/\(.id)"
+          })' <<< "$subs"
+}
+
+# Prints the CSRF token of the HTML page on stdin
+token() {
+  sed -n -e 's/.*name="authenticity_token"[^>]*value="\([^"]*\)".*/\1/p' \
+    -e 's/.*<meta name="csrf-token" content="\([^"]*\)".*/\1/p' | head -1
+}
+
+# Asks for test session $1 again through the web form, signed in with a
+# cookie, as the REST API has no retest
+retest() {
+  local reason
+  local page
+  local action
+  local code
+  local flash
+  reason=$(jq -r '.reason // empty') || die "Not JSON on stdin"
+  [ -n "$reason" ] || die "No reason on stdin"
+  [ "$AUTH" == env ] || die "retest needs MALOO_USER and MALOO_PASSWORD"
+  TMP=$(mktemp -d)
+  trap 'rm -rf "$TMP"' EXIT
+  page=$(curl -fsS -c "$TMP/jar" "$ADDR/signin") ||
+    die "Cannot read $ADDR/signin"
+  action=$(sed -n 's/.*<form[^>]*action="\([^"]*\)".*/\1/p' <<< "$page" |
+    head -1)
+  # The password goes to curl on stdin, not on its command line
+  printf '%s' "$MALOO_PASSWORD" |
+    curl -fsS -o /dev/null -b "$TMP/jar" -c "$TMP/jar" \
+      --data-urlencode "authenticity_token=$(token <<< "$page")" \
+      --data-urlencode "email=$MALOO_USER" \
+      --data-urlencode password@- \
+      --data-urlencode "commit=Sign in" \
+      "$ADDR${action:-/sessions}" || die "Cannot sign in to $ADDR"
+  # Without a session the page redirects to the sign-in
+  code=$(curl -sS -o "$TMP/page" -w '%{http_code}' -b "$TMP/jar" \
+    -c "$TMP/jar" "$ADDR/test_sessions/$1") ||
+    die "Cannot read $ADDR/test_sessions/$1"
+  [ "$code" == 200 ] || die "Cannot sign in to $ADDR: HTTP $code"
+  page=$(curl -fsS -L -b "$TMP/jar" -c "$TMP/jar" \
+    --data-urlencode "authenticity_token=$(token < "$TMP/page")" \
+    --data-urlencode "retest_option=single" \
+    --data-urlencode "bug_id=$reason" \
+    --data-urlencode "commit=Retest" \
+    "$ADDR/test_sessions/$1/retest") || die "Cannot ask for a retest of $1"
+  flash=$(sed -nE 's/.*class="flash (error|alert)">([^<]*).*/\2/p' \
+    <<< "$page" | head -1)
+  [ -z "$flash" ] || die "Retest refused: $flash"
+}
+
+if [ "$1" == "-h" -o "$1" == "--help" ]; then
+  usage
+  exit 0
+fi
+if [ "$1" == detect ]; then
+  [ $# -eq 2 ] || die "$(usage)"
+  detect "$2"
+  exit 0
+fi
+[ $# -ge 2 ] || die "$(usage)"
+
+ADDR=${1%/}
+[[ "$ADDR" =~ $HOST_RE ]] || die "Not an http(s) URL: $1"
+HOST=${BASH_REMATCH[1]}
+if [ -n "$MALOO_USER" -a -n "$MALOO_PASSWORD" ]; then
+  AUTH=env
+elif grep -qs "machine $HOST\b" ~/.netrc; then
+  AUTH=netrc
+fi
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/memex-maloo/$HOST
+
+case "$2" in
+  capabilities)
+    echo '{"tests": true, "logs": false, "retest": true, "bugs": true}'
+    ;;
+  runs)
+    [ $# -eq 3 ] || die "$(usage)"
+    [[ "$3" =~ ^[0-9A-Fa-f]+$ ]] || die "Not a commit: $3"
+    runs "$3"
+    ;;
+  run | suites | tests | retest)
+    [ $# -eq 3 ] || die "$(usage)"
+    [[ "$3" =~ $ID_RE ]] || die "Not a Maloo id: $3"
+    "$2" "$3"
+    ;;
+  logs)
+    unsupported "$2"
+    ;;
+  *)
+    die "$(usage)"
+    ;;
+esac
