@@ -1,1 +1,1 @@
-[{"id": "8f0e7a52-61c1-4f3e-9b0a-1d2c3b4a5f60", "test_session_id": "5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f50", "commit_id": "cdc360986f2590957d6fb1296b7bccfa5fdafa34", "data": "{\"branch\":\"master\",\"patch_no\":2,\"project\":\"fs/lustre-release\",\"review_no\":69978}"}]
+[{"id": "8f0e7a52-61c1-4f3e-9b0a-1d2c3b4a5f60", "test_session_id": "5e2c0d6a-1f3b-4c2e-9a7d-0b1c2d3e4f50", "commit_id": "cdc360986f2590957d6fb1296b7bccfa5fdafa34", "data": "{\"branch\":\"master\",\"patch_no\":2,\"project\":\"fs/project\",\"review_no\":69978}"}]
